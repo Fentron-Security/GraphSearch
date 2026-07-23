@@ -1,169 +1,104 @@
-# Graph Keyword Discovery
+<h1 align="center">GraphSearch</h1>
 
-Enterprise-wide keyword search across **all** OneDrive and SharePoint content in a Microsoft 365 tenant. Outputs a CSV/XLSX report of where matching files live and who owns them.
+<p align="center">
+  Enterprise-wide keyword discovery across OneDrive and SharePoint via Microsoft Graph.
+</p>
 
-Built for data discovery, DLP pre-assessments, eDiscovery scoping, and M&A/compliance sweeps.
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue.svg"></a>
+  <img alt="PowerShell 5.1+" src="https://img.shields.io/badge/PowerShell-5.1%2B-5391FE.svg">
+  <img alt="Read-only" src="https://img.shields.io/badge/access-read--only-brightgreen.svg">
+  <a href="../../actions"><img alt="CI" src="../../actions/workflows/ci.yml/badge.svg"></a>
+</p>
 
 ---
 
-## 1. Prerequisites
+Search every OneDrive and SharePoint site in a Microsoft 365 tenant for keywords, then export a report of **where matching files live and who owns them**.
 
-| Requirement | Notes |
-|---|---|
-| PowerShell 5.1+ or 7.x | 7.x recommended |
-| Entra ID app registration | App-only (client credentials) |
-| Global Admin | To grant admin consent |
-| `ImportExcel` module | Optional — enables XLSX output |
+Built for data discovery, DLP pre-assessments, eDiscovery scoping, and compliance sweeps.
+
+```powershell
+.\Invoke-GraphKeywordDiscovery.ps1 `
+    -TenantId     $env:GRAPH_TENANT_ID `
+    -ClientId     $env:GRAPH_CLIENT_ID `
+    -ClientSecret $env:GRAPH_CLIENT_SECRET `
+    -Keywords     "confidential","SSN","passport" `
+    -Region       NAM
+```
+
+## Features
+
+- **Tenant-wide** — every SharePoint site and every user's OneDrive in a single run
+- **Content search, not filename search** — matches text *inside* documents via the Microsoft Search index
+- **Two modes** — fast index-based search, or exhaustive drive-by-drive enumeration for defensible coverage
+- **KQL support** — narrow by file type, date range, author, or site
+- **Location + ownership report** — CSV always, XLSX when `ImportExcel` is installed
+- **Read-only by design** — the tool never writes to, modifies, or deletes tenant content
+- **Throttle-tolerant** — token auto-refresh and `Retry-After` backoff for long tenant-scale runs
+
+## Quick start
+
+**1. Register an Entra ID app** with these **Application** permissions, then grant admin consent:
+
+| Permission | Purpose |
+| --- | --- |
+| `Files.Read.All` | Read files across all drives |
+| `Sites.Read.All` | Read all SharePoint sites |
+| `User.Read.All` | `enumerate` mode only — resolve users to their OneDrive |
+
+Full walkthrough, including certificate auth: **[docs/APP-REGISTRATION.md](docs/APP-REGISTRATION.md)**
+
+**2. Configure credentials**
+
+```powershell
+Copy-Item .env.example .env   # then fill it in — .env is gitignored
+```
+
+**3. Optional — XLSX output**
 
 ```powershell
 Install-Module ImportExcel -Scope CurrentUser
 ```
 
----
+**4. Run.** Full parameter reference, KQL syntax, and troubleshooting: **[docs/USAGE.md](docs/USAGE.md)**
 
-## 2. Entra ID App Registration
+## Modes
 
-1. **Entra admin center** → Applications → App registrations → **New registration**
-   - Name: `Graph Keyword Discovery`
-   - Supported account types: *Single tenant*
-   - Redirect URI: leave blank
-2. Copy the **Application (client) ID** and **Directory (tenant) ID**
-3. **Certificates & secrets** → New client secret → copy the **Value** immediately
-4. **API permissions** → Add a permission → Microsoft Graph → **Application permissions**:
+| Mode | Speed | Coverage | Use when |
+| --- | --- | --- | --- |
+| `search` *(default)* | Minutes | Indexed content only | Most engagements |
+| `enumerate` | Hours | Every drive, deterministic | Litigation hold, audit, validating index gaps |
 
-   | Permission | Why |
-   |---|---|
-   | `Files.Read.All` | Read all files across all drives |
-   | `Sites.Read.All` | Read all SharePoint sites |
-   | `User.Read.All` | *(enumerate mode only)* resolve users to their OneDrive |
+## Output
 
-5. Click **Grant admin consent** — the script will 403 without it.
+CSV (and XLSX) written to `report/keyword-discovery-YYYYMMDD-HHMMSS.csv`:
 
-> **Least privilege:** these are read-only but tenant-wide. Scope with [Sites.Selected](https://learn.microsoft.com/en-us/graph/permissions-reference) plus per-site grants if the client requires narrower access.
+`Keyword` · `FileName` · `WebUrl` · `SiteId` · `DriveId` · `Path` · `SizeKB` · `LastModified` · `ModifiedBy` · `CreatedBy` · `ItemId`
 
----
+Sample: [examples/sample-report.csv](examples/sample-report.csv)
 
-## 3. Usage
+## Limitations
 
-```powershell
-.\Invoke-GraphKeywordDiscovery.ps1 `
-    -TenantId     "00000000-0000-0000-0000-000000000000" `
-    -ClientId     "00000000-0000-0000-0000-000000000000" `
-    -ClientSecret "your-secret-value" `
-    -Keywords     "confidential","SSN","passport","merger" `
-    -Region       NAM
-```
-
-### Parameters
-
-| Parameter | Required | Default | Description |
-|---|---|---|---|
-| `-TenantId` | yes | — | Directory (tenant) ID |
-| `-ClientId` | yes | — | Application (client) ID |
-| `-ClientSecret` | yes | — | Client secret value |
-| `-Keywords` | yes | — | One or more search terms (KQL supported) |
-| `-Region` | no | `NAM` | Graph search region — **required for app-only search**. `NAM`, `EUR`, `APC`, `GBR`, `AUS`, `CAN`, `IND`, `JPN` |
-| `-Mode` | no | `search` | `search` or `enumerate` — see below |
-| `-OutDir` | no | `.\report` | Output directory |
-| `-PageSize` | no | `200` | Results per page (max 500) |
-
----
-
-## 4. Modes
-
-### `search` — index-based (default)
-
-Uses `POST /search/query`. One call per keyword, tenant-wide, served from the Microsoft Search index.
-
-- **Fast** — minutes, not hours
-- Searches **file content and metadata**, not just filenames
-- Best for most engagements
-
-**Limits:** only indexed content is returned. Very recent uploads, unsupported file types, and content excluded from the index will be missed. Deep result paging is capped, so very broad terms should be narrowed with KQL.
-
-### `enumerate` — drive-by-drive
-
-Walks every SharePoint site drive and every user's OneDrive, running a per-drive search on each.
-
-- **Exhaustive and deterministic** — you know exactly which drives were covered
-- **Slow** — hours at large tenant scale, and heavily throttled
-- Use as a fallback, for validation, or when defensible coverage matters (litigation hold, audit)
-
-```powershell
-.\Invoke-GraphKeywordDiscovery.ps1 -TenantId ... -Mode enumerate -Keywords "SSN"
-```
-
----
-
-## 5. KQL Query Refinement
-
-The `-Keywords` values are passed to Microsoft Search as KQL. Use this to cut noise on broad terms.
-
-| Goal | Example |
-|---|---|
-| File type | `"SSN filetype:xlsx"` |
-| Multiple types | `"confidential (filetype:docx OR filetype:pdf)"` |
-| Exact phrase | `'"employee roster"'` |
-| Date range | `"merger lastModifiedTime>=2025-01-01"` |
-| Single site | `"SSN path:https://contoso.sharepoint.com/sites/HR"` |
-| Author | `"budget author:\"Jane Doe\""` |
-| Exclusion | `"passport -template"` |
-| Combined | `"SSN filetype:xlsx lastModifiedTime>=2024-01-01"` |
-
----
-
-## 6. Output
-
-`report\keyword-discovery-YYYYMMDD-HHMMSS.csv` (and `.xlsx` if `ImportExcel` is installed)
-
-| Column | Description |
-|---|---|
-| `Keyword` | Which search term matched |
-| `FileName` | File name |
-| `WebUrl` | Direct link to the file |
-| `SiteId` | SharePoint site GUID |
-| `DriveId` | Drive GUID |
-| `Path` | Folder path within the drive |
-| `SizeKB` | File size |
-| `LastModified` | Last modified timestamp (UTC) |
-| `ModifiedBy` | Last modifier display name |
-| `CreatedBy` | Creator display name |
-| `ItemId` | driveItem ID (for follow-up Graph calls) |
-
-A per-keyword hit-count summary prints to console at the end.
-
----
-
-## 7. Operational Notes
-
-**Throttling.** Graph returns 429s at tenant scale. The script honors `Retry-After` with exponential backoff. Expect long-running `enumerate` jobs to pause repeatedly — this is normal, not a failure.
-
-**Token expiry.** Access tokens last ~60 min. The script auto-refreshes on 401, so long runs are safe.
-
-**Duplicates.** A file matching several keywords appears once per keyword. De-dupe on `WebUrl` in Excel if you want a unique file list.
-
-**Permissions on hits.** The report shows *where* files are, not *who can see them*. For exposure analysis, follow up with `GET /drives/{driveId}/items/{itemId}/permissions` using the `DriveId` and `ItemId` columns.
-
-**Secret handling.** Don't hardcode the client secret. Prefer a certificate credential, Azure Key Vault, or environment variables. Delete the app registration when the engagement closes.
-
----
-
-## 8. Limitations
-
-- **Keyword ≠ pattern matching.** This finds the literal string `SSN`, not an unlabeled 9-digit number inside a spreadsheet. For true sensitive-data-type detection (SSN, PAN, PHI patterns), layer **Microsoft Purview** sensitive info types / Content Explorer on top.
-- **No OCR.** Scanned PDFs and images are only found if the tenant has OCR indexing enabled.
+- **Keyword ≠ pattern matching.** Finds the literal string `SSN`, not an unlabeled 9-digit number. For real sensitive-data-type detection, layer **Microsoft Purview** sensitive info types on top.
+- **No OCR** unless the tenant has OCR indexing enabled.
 - **Encrypted / password-protected files** are not indexed and will not match.
-- **Teams chat, Exchange, and Planner** are out of scope — this covers `driveItem` only. Change `entityTypes` to extend.
+- **Scope is `driveItem` only** — Exchange, Teams chat, and Planner are out of scope.
 
----
+## Security
 
-## 9. Troubleshooting
+This tool can read **every file in a tenant**. Get written authorization before running it against an environment you do not own, and read **[SECURITY.md](SECURITY.md)** first.
 
-| Symptom | Cause / Fix |
-|---|---|
-| `403 Forbidden` on `/search/query` | Admin consent not granted, or `Region` missing from the request body |
-| `401 Unauthorized` immediately | Wrong tenant/client ID, or expired secret |
-| Zero results, no error | Content not indexed yet; try `-Mode enumerate` to confirm |
-| `400 Bad Request` on search | Malformed KQL — check quoting and escaping |
-| Constant 429s | Reduce `-PageSize`, run off-hours, or split keywords across runs |
-| `enumerate` skips users | Users without a provisioned OneDrive are silently skipped (expected) |
+Never commit `.env`, certificates, or generated reports — the included `.gitignore` blocks all three.
+
+## Documentation
+
+| Doc | Contents |
+| --- | --- |
+| [docs/USAGE.md](docs/USAGE.md) | Parameters, modes, KQL reference, output schema, troubleshooting |
+| [docs/APP-REGISTRATION.md](docs/APP-REGISTRATION.md) | Entra ID setup, certificate and secret auth, decommissioning |
+| [SECURITY.md](SECURITY.md) | Authorization, credential handling, output handling, disclosure |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Style, linting, PR scope |
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
