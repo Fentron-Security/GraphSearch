@@ -1,0 +1,38 @@
+# ---- Secrets: never commit ----
+*.env
+.env*
+!.env.example
+config.json
+config.psd1
+secrets.*
+*.pfx
+*.p12
+*.pem
+*.key
+appsettings.local.json
+
+# ---- Engagement output: client data, never commit ----
+report/
+reports/
+output/
+*.csv
+*.xlsx
+*.xls
+!examples/*.csv
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- PowerShell ----
+*.ps1xml.bak
+PSScriptAnalyzerResults.*
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+*.swp
