@@ -28,7 +28,7 @@ Built for data discovery, DLP pre-assessments, eDiscovery scoping, and complianc
 
 ## Features
 
-- **Tenant-wide** — every SharePoint site and every user's OneDrive in a single run
+- **Scoped or tenant-wide** — search the whole tenant, specific users' OneDrive, or specific SharePoint sites
 - **Content search, not filename search** — matches text *inside* documents via the Microsoft Search index
 - **Two modes** — fast index-based search, or exhaustive drive-by-drive enumeration for defensible coverage
 - **KQL support** — narrow by file type, date range, author, or site
@@ -40,11 +40,13 @@ Built for data discovery, DLP pre-assessments, eDiscovery scoping, and complianc
 
 **1. Register an Entra ID app** with these **Application** permissions, then grant admin consent:
 
-| Permission | Purpose |
+| Scope | Required permissions |
 | --- | --- |
-| `Files.Read.All` | Read files across all drives |
-| `Sites.Read.All` | Read all SharePoint sites |
-| `User.Read.All` | `enumerate` mode only — resolve users to their OneDrive |
+| `Tenant` | `Files.Read.All`, `Sites.Read.All`, `User.Read.All` *(enumerate mode)* |
+| `User` | `Files.Read.All`, `User.Read.All` |
+| `Site` | `Files.Read.All`, `Sites.Read.All` — or `Sites.Selected` + per-site grant |
+
+Narrower scope needs fewer permissions. Prefer the smallest one the engagement allows.
 
 Full walkthrough, including certificate auth: **[docs/APP-REGISTRATION.md](docs/APP-REGISTRATION.md)**
 
@@ -62,7 +64,24 @@ Install-Module ImportExcel -Scope CurrentUser
 
 **4. Run.** Full parameter reference, KQL syntax, and troubleshooting: **[docs/USAGE.md](docs/USAGE.md)**
 
+## Scope
+
+```powershell
+-Scope Tenant                                              # default: everything
+-Scope User -Users "jdoe@contoso.com","asmith@contoso.com" # named users' OneDrive
+-Scope Site -Sites "https://contoso.sharepoint.com/sites/HR"
+```
+
+| Scope | Searches |
+| --- | --- |
+| `Tenant` *(default)* | Every SharePoint site and every user's OneDrive |
+| `User` | Only the named users' OneDrive |
+| `Site` | Only the named SharePoint sites |
+
 ## Modes
+
+`-Mode` applies to `-Scope Tenant` only. `User` and `Site` always use per-drive search.
+
 
 | Mode | Speed | Coverage | Use when |
 | --- | --- | --- | --- |
@@ -71,9 +90,9 @@ Install-Module ImportExcel -Scope CurrentUser
 
 ## Output
 
-CSV (and XLSX) written to `report/keyword-discovery-YYYYMMDD-HHMMSS.csv`:
+CSV (and XLSX) written to `report/keyword-discovery-<scope>-YYYYMMDD-HHMMSS.csv`:
 
-`Keyword` · `FileName` · `WebUrl` · `SiteId` · `DriveId` · `Path` · `SizeKB` · `LastModified` · `ModifiedBy` · `CreatedBy` · `ItemId`
+`Keyword` · `Owner` · `FileName` · `WebUrl` · `SiteId` · `DriveId` · `Path` · `SizeKB` · `LastModified` · `ModifiedBy` · `CreatedBy` · `ItemId`
 
 Sample: [examples/sample-report.csv](examples/sample-report.csv)
 

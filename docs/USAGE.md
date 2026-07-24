@@ -21,14 +21,72 @@ Install-Module ImportExcel -Scope CurrentUser
 
 ## Usage
 
+### Tenant-wide (default)
+
 ```powershell
 .\Invoke-GraphKeywordDiscovery.ps1 `
     -TenantId     $env:GRAPH_TENANT_ID `
     -ClientId     $env:GRAPH_CLIENT_ID `
     -ClientSecret $env:GRAPH_CLIENT_SECRET `
-    -Keywords     "confidential","SSN","passport","merger" `
+    -Keywords     "confidential","SSN","passport" `
     -Region       NAM
 ```
+
+### Specific users
+
+```powershell
+.\Invoke-GraphKeywordDiscovery.ps1 `
+    -TenantId $env:GRAPH_TENANT_ID -ClientId $env:GRAPH_CLIENT_ID `
+    -ClientSecret $env:GRAPH_CLIENT_SECRET `
+    -Scope    User `
+    -Users    "jdoe@contoso.com","asmith@contoso.com" `
+    -Keywords "severance","offer letter"
+```
+
+Feed a list from a file:
+
+```powershell
+$targets = Get-Content .\departing-users.txt
+.\Invoke-GraphKeywordDiscovery.ps1 ... -Scope User -Users $targets -Keywords "confidential"
+```
+
+### Specific SharePoint sites
+
+```powershell
+.\Invoke-GraphKeywordDiscovery.ps1 `
+    -TenantId $env:GRAPH_TENANT_ID -ClientId $env:GRAPH_CLIENT_ID `
+    -ClientSecret $env:GRAPH_CLIENT_SECRET `
+    -Scope    Site `
+    -Sites    "https://contoso.sharepoint.com/sites/HR","https://contoso.sharepoint.com/sites/Legal" `
+    -Keywords "SSN"
+```
+
+---
+
+## Scope
+
+`-Scope` sets the blast radius. Use the narrowest one the engagement allows.
+
+| Scope | Searches | Required permissions |
+|---|---|---|
+| `Tenant` *(default)* | Every SharePoint site and every user's OneDrive | `Files.Read.All`, `Sites.Read.All`, `User.Read.All` *(enumerate mode)* |
+| `User` | Only the named users' OneDrive | `Files.Read.All`, `User.Read.All` |
+| `Site` | Only the named SharePoint sites | `Files.Read.All`, `Sites.Read.All` — or `Sites.Selected` + per-site grant |
+
+`User` and `Site` scope always run per-drive search; `-Mode` applies to `Tenant` only and is ignored (with a warning) otherwise.
+
+**Why it matters.** `Tenant` scope needs tenant-wide read across every mailbox owner's private OneDrive. `User` scope with `Sites.Selected` avoids `Sites.Read.All` entirely — much easier to get a client to sign off on, and a much smaller footprint if the credential is ever compromised.
+
+**Site reference formats.** Both work:
+
+```
+https://contoso.sharepoint.com/sites/HR
+contoso.sharepoint.com:/sites/HR
+```
+
+Users can be UPN or object ID. Users without a provisioned OneDrive are warned and skipped, not fatal.
+
+---
 
 ### Parameters
 
@@ -38,14 +96,19 @@ Install-Module ImportExcel -Scope CurrentUser
 | `-ClientId` | yes | — | Application (client) ID |
 | `-ClientSecret` | yes | — | Client secret value |
 | `-Keywords` | yes | — | One or more search terms (KQL supported) |
-| `-Region` | no | `NAM` | Graph search region — **required for app-only search**. `NAM`, `EUR`, `APC`, `GBR`, `AUS`, `CAN`, `IND`, `JPN` |
-| `-Mode` | no | `search` | `search` or `enumerate` — see below |
+| `-Scope` | no | `Tenant` | `Tenant`, `User`, or `Site` |
+| `-Users` | if `Scope User` | — | UPNs or object IDs |
+| `-Sites` | if `Scope Site` | — | Site URLs |
+| `-Region` | no | `NAM` | Graph search region — **required for tenant `search` mode**. `NAM`, `EUR`, `APC`, `GBR`, `AUS`, `CAN`, `IND`, `JPN` |
+| `-Mode` | no | `search` | `search` or `enumerate` — `Tenant` scope only |
 | `-OutDir` | no | `.\report` | Output directory |
 | `-PageSize` | no | `200` | Results per page (max 500) |
 
 ---
 
 ## Modes
+
+Applies to `-Scope Tenant` only.
 
 ### `search` — index-based (default)
 
@@ -90,11 +153,12 @@ The `-Keywords` values are passed to Microsoft Search as KQL. Use this to cut no
 
 ## Output
 
-`report\keyword-discovery-YYYYMMDD-HHMMSS.csv` (and `.xlsx` if `ImportExcel` is installed)
+`report\keyword-discovery-<scope>-YYYYMMDD-HHMMSS.csv` (and `.xlsx` if `ImportExcel` is installed)
 
 | Column | Description |
 |---|---|
 | `Keyword` | Which search term matched |
+| `Owner` | Drive owner — UPN for OneDrive, site URL for SharePoint. `(tenant)` for index-based search |
 | `FileName` | File name |
 | `WebUrl` | Direct link to the file |
 | `SiteId` | SharePoint site GUID |
@@ -143,3 +207,6 @@ A per-keyword hit-count summary prints to console at the end.
 | `400 Bad Request` on search | Malformed KQL — check quoting and escaping |
 | Constant 429s | Reduce `-PageSize`, run off-hours, or split keywords across runs |
 | `enumerate` skips users | Users without a provisioned OneDrive are silently skipped (expected) |
+| `-Scope User requires -Users` | Pass one or more UPNs with `-Users` |
+| `No drives resolved` on User scope | UPN typo, user has no OneDrive, or `User.Read.All` not consented |
+| `No drives resolved` on Site scope | Site URL wrong, or `Sites.Selected` granted without a per-site permission entry |
