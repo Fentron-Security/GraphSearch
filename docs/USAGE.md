@@ -95,14 +95,15 @@ Users can be UPN or object ID. Users without a provisioned OneDrive are warned a
 | `-TenantId` | yes | — | Directory (tenant) ID |
 | `-ClientId` | yes | — | Application (client) ID |
 | `-ClientSecret` | yes | — | Client secret value |
-| `-Keywords` | yes | — | One or more search terms (KQL supported) |
+| `-Keywords` | yes | — | One or more search terms (KQL supported). Multi-word terms are auto-quoted as exact phrases |
 | `-Scope` | no | `Tenant` | `Tenant`, `User`, or `Site` |
 | `-Users` | if `Scope User` | — | UPNs or object IDs |
 | `-Sites` | if `Scope Site` | — | Site URLs |
 | `-Region` | no | `NAM` | Graph search region — **required for tenant `search` mode**. `NAM`, `EUR`, `APC`, `GBR`, `AUS`, `CAN`, `IND`, `JPN` |
 | `-Mode` | no | `search` | `search` or `enumerate` — `Tenant` scope only |
+| `-NoPhraseQuoting` | no | off | Disable auto-quoting; treat multi-word terms as `AND` anywhere |
 | `-OutDir` | no | `.\report` | Output directory |
-| `-PageSize` | no | `200` | Results per page (max 500) |
+| `-PageSize` | no | `500` | Results per page (max 500). Higher = fewer round trips = faster |
 
 ---
 
@@ -133,6 +134,17 @@ Walks every SharePoint site drive and every user's OneDrive, running a per-drive
 ```
 
 ---
+
+## Multi-word keywords and performance
+
+**Phrases.** A keyword with a space is wrapped in quotes and searched as an exact phrase by default. Without this, KQL reads `foo bar` as `foo AND bar` scattered anywhere in a document — the noisy, inconsistent behavior seen in early testing. `-NoPhraseQuoting` restores the old behavior when you actually want the AND semantics.
+
+**Why some keywords are slow and others instant.** Runtime scales with hit count, not query complexity. A common term (`Personalnummer` in a German HR estate) returns thousands of hits across many pages, each page a round trip; a rare term finishes in one. Two levers:
+
+- `-PageSize 500` (now the default) cuts the number of round trips.
+- Narrow broad terms with KQL — `filetype`, `lastModifiedTime`, `path` — so you page through fewer junk hits. See the table below.
+
+**Keyword ≠ context.** Even a fast, precise keyword hit only proves the *word* is present. To confirm a real identifier and see how it was used, run [Stage 2 context validation](CONTEXT-VALIDATION.md).
 
 ## KQL Query Refinement
 

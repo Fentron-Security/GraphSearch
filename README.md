@@ -30,6 +30,8 @@ Built for data discovery, DLP pre-assessments, eDiscovery scoping, and complianc
 
 - **Scoped or tenant-wide** — search the whole tenant, specific users' OneDrive, or specific SharePoint sites
 - **Content search, not filename search** — matches text *inside* documents via the Microsoft Search index
+- **Two-stage validation** — optional Stage 2 downloads hits and runs regex + checksum validators to separate real identifiers from keyword noise, with surrounding context
+- **Global identifier coverage** — payment cards (Luhn), IBAN (mod-97), and national IDs for US, UK, DE, CH, NL, ES, CA; selectable by country or data category, and extensible with one registry entry
 - **Two modes** — fast index-based search, or exhaustive drive-by-drive enumeration for defensible coverage
 - **KQL support** — narrow by file type, date range, author, or site
 - **Location + ownership report** — CSV always, XLSX when `ImportExcel` is installed
@@ -63,6 +65,21 @@ Install-Module ImportExcel -Scope CurrentUser
 ```
 
 **4. Run.** Full parameter reference, KQL syntax, and troubleshooting: **[docs/USAGE.md](docs/USAGE.md)**
+
+## Two-stage pipeline
+
+The index tells you a keyword *appears*; it can't tell you whether a real identifier is present or in what context (Microsoft Search has no regex). Stage 2 closes that gap.
+
+```powershell
+# Stage 1 - locate
+.\Invoke-GraphKeywordDiscovery.ps1 ... -Keywords "Sozialversicherungsnummer"
+
+# Stage 2 - validate the hits with checksum + context
+.\Invoke-ContextValidation.ps1 ... -ReportCsv .\report\keyword-discovery-tenant-*.csv `
+    -Country DE,CH,NL,US
+```
+
+Stage 2 downloads only the files Stage 1 flagged, extracts their text locally, and confirms which contain a checksum-valid identifier — payment cards, IBANs, or national IDs across supported jurisdictions — with the surrounding text. Scope by `-Country` or `-Category`. See [docs/CONTEXT-VALIDATION.md](docs/CONTEXT-VALIDATION.md).
 
 ## Scope
 
@@ -102,6 +119,7 @@ Sample: [examples/sample-report.csv](examples/sample-report.csv)
 - **No OCR** unless the tenant has OCR indexing enabled.
 - **Encrypted / password-protected files** are not indexed and will not match.
 - **Scope is `driveItem` only** — Exchange, Teams chat, and Planner are out of scope.
+- **Multi-word keywords** are searched as exact phrases by default; use `-NoPhraseQuoting` for the old AND-anywhere behavior.
 
 ## Security
 
@@ -113,7 +131,8 @@ Never commit `.env`, certificates, or generated reports — the included `.gitig
 
 | Doc | Contents |
 | --- | --- |
-| [docs/USAGE.md](docs/USAGE.md) | Parameters, modes, KQL reference, output schema, troubleshooting |
+| [docs/USAGE.md](docs/USAGE.md) | Parameters, scope, modes, KQL reference, output schema, troubleshooting |
+| [docs/CONTEXT-VALIDATION.md](docs/CONTEXT-VALIDATION.md) | Stage 2 — checksum validators, two-stage pipeline, custom validators |
 | [docs/APP-REGISTRATION.md](docs/APP-REGISTRATION.md) | Entra ID setup, certificate and secret auth, decommissioning |
 | [SECURITY.md](SECURITY.md) | Authorization, credential handling, output handling, disclosure |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Style, linting, PR scope |

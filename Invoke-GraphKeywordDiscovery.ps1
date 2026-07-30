@@ -82,8 +82,16 @@ param(
     #   enumerate = walk every drive, exhaustive, slow
     [ValidateSet("search","enumerate")][string]$Mode = "search",
 
+    # By default a keyword containing a space is wrapped in quotes and searched
+    # as an exact phrase. Without this, KQL treats "foo bar" as foo AND bar
+    # anywhere in the document - noisy and inconsistent. Set this switch to
+    # keep the old AND behavior.
+    [switch]$NoPhraseQuoting,
+
     [string]$OutDir = ".\report",
-    [int]$PageSize = 200
+
+    # Larger pages = fewer round trips = faster on high-hit keywords. Max 500.
+    [int]$PageSize = 500
 )
 
 $ErrorActionPreference = "Stop"
@@ -97,6 +105,20 @@ if ($Scope -eq "Site" -and -not $Sites) {
 }
 if ($Scope -ne "Tenant" -and $PSBoundParameters.ContainsKey('Mode')) {
     Write-Warning "-Mode applies to -Scope Tenant only; ignored for Scope=$Scope."
+}
+if ($PageSize -gt 500) { Write-Warning "PageSize capped at 500 by Graph."; $PageSize = 500 }
+
+# ---------- Keyword normalization ----------
+# Multi-word keyword -> exact phrase, unless the caller already quoted it or
+# used KQL operators, or opted out with -NoPhraseQuoting.
+function Format-Keyword {
+    param([string]$Keyword)
+    if ($NoPhraseQuoting) { return $Keyword }
+    $k = $Keyword.Trim()
+    if ($k -match '\s' -and $k -notmatch '["():]' -and $k -notmatch '\b(AND|OR|NOT)\b') {
+        return '"{0}"' -f $k
+    }
+    return $k
 }
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -239,13 +261,14 @@ function Get-AllTenantDrives {
 function Search-IndexWide {
     param([string[]]$Keywords,[string]$Region,[int]$PageSize)
     foreach ($kw in $Keywords) {
-        Write-Host "[search] '$kw'" -ForegroundColor Cyan
+        $q = Format-Keyword $kw
+        Write-Host "[search] $q" -ForegroundColor Cyan
         $from = 0
         do {
             $body = @{
                 requests = @(@{
                     entityTypes = @("driveItem")
-                    query       = @{ queryString = $kw }
+                    query       = @{ queryString = $q }
                     from        = $from
                     size        = $PageSize
                     region      = $Region
@@ -269,7 +292,9 @@ function Search-Drives {
         $n++
         Write-Host "[$n/$($Drives.Count)] $($drv.Owner)" -ForegroundColor Cyan
         foreach ($kw in $Keywords) {
-            $uri = "https://graph.microsoft.com/v1.0/drives/$($drv.Id)/root/search(q='$kw')?`$top=200"
+            $q = Format-Keyword $kw
+            $qEnc = [uri]::EscapeDataString($q)
+            $uri = "https://graph.microsoft.com/v1.0/drives/$($drv.Id)/root/search(q='$qEnc')?`$top=200"
             do {
                 try { $r = Invoke-Graph -Uri $uri } catch { break }
                 foreach ($item in $r.value) { Add-Hit -item $item -keyword $kw -owner $drv.Owner }

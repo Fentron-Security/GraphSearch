@@ -16,15 +16,27 @@ Record the **Application (client) ID** and **Directory (tenant) ID** from the Ov
 
 **API permissions → Add a permission → Microsoft Graph → Application permissions**
 
-| Permission | Required for |
+Grant only what the scope you'll run actually needs — narrower scope, fewer permissions, easier client sign-off.
+
+| Permission | Needed for |
 |---|---|
-| `Files.Read.All` | All modes |
-| `Sites.Read.All` | All modes |
-| `User.Read.All` | `enumerate` mode only |
+| `Files.Read.All` | Every scope, and Stage 2 content download |
+| `Sites.Read.All` | `-Scope Tenant` and `-Scope Site` |
+| `User.Read.All` | `-Scope User`, and `-Scope Tenant -Mode enumerate` |
+
+By scope:
+
+| Run | Permissions |
+|---|---|
+| `-Scope Tenant` (search) | `Files.Read.All`, `Sites.Read.All` |
+| `-Scope Tenant -Mode enumerate` | `Files.Read.All`, `Sites.Read.All`, `User.Read.All` |
+| `-Scope User` | `Files.Read.All`, `User.Read.All` — **no `Sites.Read.All`** |
+| `-Scope Site` | `Files.Read.All`, `Sites.Read.All` — or `Sites.Selected` + per-site grant |
+| Stage 2 (`Invoke-ContextValidation`) | `Files.Read.All` |
 
 Then click **Grant admin consent for \<tenant\>**. Without consent every call returns `403`.
 
-> **Narrower alternative:** replace `Sites.Read.All` with `Sites.Selected` and grant per-site access via `PUT /sites/{siteId}/permissions`. Reduces blast radius when the client will only authorize specific sites.
+> **Narrowest footprint.** `-Scope User` avoids tenant-wide SharePoint read entirely, and `-Scope Site` with `Sites.Selected` (grant per-site via `PUT /sites/{siteId}/permissions`) limits access to named sites. Prefer these when a client is cautious about a tenant-wide read grant.
 
 ## 3. Credentials
 
