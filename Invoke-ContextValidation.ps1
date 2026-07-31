@@ -29,9 +29,11 @@
       2. Invoke-ContextValidation.ps1 -ReportCsv <that csv>  -> validated CSV
 
     Text extraction is native for: txt, csv, tsv, log, xml, html, json, md,
-    docx, xlsx, pptx. PDF needs pdftotext (poppler). Legacy binary doc/xls/ppt
-    and zip archives are handled if LibreOffice (soffice) is available; zips are
-    recursed into. Missing helpers are reported once at startup, not per file.
+    docx, xlsx, pptx, msg. PDF needs pdftotext (poppler). Legacy binary
+    doc/xls/ppt and zip archives are handled if LibreOffice (soffice) is
+    available; zips are recursed into. Missing helpers are reported once at
+    startup, not per file. Use -DryRun to plan a run (types, sizes, coverage)
+    without authenticating or downloading anything.
 
     Output is two reports: a full occurrence-level CSV, and a DISTINCT report
     that collapses repeated numbers to one row per unique identifier with file
@@ -82,6 +84,10 @@ param(
     # Skip the distinct/summary report and emit only the full occurrence CSV.
     [switch]$NoDistinctReport,
 
+    # Plan only: classify what a run WOULD download (types, sizes, coverage) and
+    # write a manifest, without authenticating or pulling any file content.
+    [switch]$DryRun,
+
     [string]$OutDir = ".\report",
     [switch]$KeepFiles
 )
@@ -131,7 +137,9 @@ function Get-GraphToken {
         -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
         -ContentType "application/x-www-form-urlencoded" -Body $body).access_token
 }
-$script:Token = Get-GraphToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+if (-not $DryRun) {
+    $script:Token = Get-GraphToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+}
 
 function Invoke-GraphDownload {
     param([string]$DriveId,[string]$ItemId,[string]$OutFile)
@@ -191,6 +199,28 @@ function Invoke-Soffice {
     $target = Join-Path $OutDir ([System.IO.Path]::GetFileNameWithoutExtension($Source) + '.' + ($ConvertTo -split ':')[0])
     if (Test-Path $target) { return $target }
     return $null
+}
+
+function Get-MsgText {
+    # Outlook .msg is an OLE2 compound file; the body/subject/headers live in
+    # UTF-16 (and sometimes ASCII) property streams. Rather than pull in an
+    # OLE2 parser, extract printable UTF-16LE and ASCII runs directly - crude,
+    # but it reliably surfaces the identifiers and surrounding words we need.
+    # Note: binary attachments inside the .msg (e.g. an embedded PDF) are not
+    # decoded here; they'd need separate extraction.
+    param([string]$Path)
+    try { $bytes = [System.IO.File]::ReadAllBytes($Path) } catch { return $null }
+    $sb = New-Object System.Text.StringBuilder
+    # UTF-16LE at both byte alignments (stream may not be even-aligned once
+    # we're scanning the whole container rather than a single sector).
+    foreach ($off in 0,1) {
+        if ($off -ge $bytes.Length) { continue }
+        $u = [System.Text.Encoding]::Unicode.GetString($bytes, $off, $bytes.Length - $off)
+        foreach ($m in [regex]::Matches($u, '[\x20-\x7E\u00A0-\u024F]{4,}')) { [void]$sb.AppendLine($m.Value) }
+    }
+    $a = [System.Text.Encoding]::ASCII.GetString($bytes)
+    foreach ($m in [regex]::Matches($a, '[\x20-\x7E]{4,}')) { [void]$sb.AppendLine($m.Value) }
+    return $sb.ToString()
 }
 
 function Convert-LegacyOffice {
@@ -265,6 +295,9 @@ function Get-FileText {
         '^\.zip$' {
             return Get-ArchiveText -Path $Path -Depth $Depth
         }
+        '^\.msg$' {
+            return Get-MsgText -Path $Path
+        }
         '^\.pdf$' {
             if (-not $script:HasPdftotext) { return $null }   # already warned at startup
             $txt = "$Path.txt"
@@ -287,6 +320,51 @@ if (-not ($rows | Get-Member -Name DriveId) -or -not ($rows | Get-Member -Name I
 
 # de-dupe files: one download per unique DriveId+ItemId even if multiple keyword hits
 $files = $rows | Sort-Object DriveId,ItemId -Unique
+
+# Classify an extension by how Stage 2 will handle it.
+function Get-Disposition {
+    param([string]$Ext,[double]$SizeKB)
+    if ($SizeKB -and ($SizeKB / 1024) -gt $MaxFileMB) { return 'oversized' }
+    switch -Regex ($Ext.ToLower()) {
+        '^\.(txt|csv|tsv|log|md|json|xml|html?|xhtml|docx|xlsx|pptx)$' { 'native' }
+        '^\.pdf$'            { if ($script:HasPdftotext) { 'pdf' } else { 'pdf (helper missing)' } }
+        '^\.(doc|xls|ppt)$'  { if ($script:HasSoffice)   { 'legacy-office' } else { 'legacy-office (helper missing)' } }
+        '^\.zip$'            { 'zip' }
+        '^\.msg$'            { 'msg' }
+        default              { 'unsupported' }
+    }
+}
+
+# ---------- Dry run: plan only, no auth, no download ----------
+if ($DryRun) {
+    $plan = foreach ($f in $files) {
+        $ext = [System.IO.Path]::GetExtension($f.FileName)
+        [pscustomobject]@{
+            FileName    = $f.FileName
+            Extension   = $ext.ToLower()
+            SizeKB      = $f.SizeKB
+            Disposition = Get-Disposition -Ext $ext -SizeKB ([double]($f.SizeKB))
+            Owner       = $f.Owner
+            WebUrl      = $f.WebUrl
+        }
+    }
+    $stamp = Get-Date -Format yyyyMMdd-HHmmss
+    $manifest = Join-Path $OutDir "context-validation-$stamp-dryrun.csv"
+    $plan | Export-Csv -Path $manifest -NoTypeInformation -Encoding UTF8
+
+    $totalMB = [math]::Round((($files | Measure-Object -Property SizeKB -Sum).Sum / 1024), 1)
+    Write-Host "DRY RUN - no content downloaded." -ForegroundColor Yellow
+    Write-Host "$($files.Count) unique file(s), ~${totalMB}MB to download for a real run." -ForegroundColor Yellow
+    Write-Host "Manifest -> $manifest`n" -ForegroundColor Green
+    Write-Host "By planned disposition:" -ForegroundColor Yellow
+    $plan | Group-Object Disposition | Sort-Object Count -Descending |
+        Select-Object @{n='Disposition';e={$_.Name}}, Count | Format-Table -AutoSize
+    Write-Host "By extension:" -ForegroundColor Yellow
+    $plan | Group-Object Extension | Sort-Object Count -Descending |
+        Select-Object @{n='Extension';e={$_.Name}}, Count | Format-Table -AutoSize
+    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    return
+}
 
 # Resolve selection once for logging.
 $selected = Get-ValidatorDefinitions -Name $Validators -Country $Country -Category $Category

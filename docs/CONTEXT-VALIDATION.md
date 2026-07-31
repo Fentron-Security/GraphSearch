@@ -147,7 +147,9 @@ The console summary prints occurrence counts (valid / invalid / no-checksum) and
 
 ## Supported file types
 
-Native (no external tools): `txt`, `csv`, `tsv`, `log`, `md`, `json`, `xml`, `html`, `docx`, `xlsx`, `pptx`.
+Native (no external tools): `txt`, `csv`, `tsv`, `log`, `md`, `json`, `xml`, `html`, `docx`, `xlsx`, `pptx`, `msg`.
+
+`msg` (Outlook) is read by extracting printable UTF-16 and ASCII runs from the message container, which reliably surfaces identifiers in the subject, body, and headers. Binary attachments embedded inside a `.msg` (e.g. a PDF) are not decoded from within it.
 
 With optional helpers on `PATH`:
 
@@ -159,7 +161,7 @@ With optional helpers on `PATH`:
 
 Stage 2 checks for these helpers **at startup** and prints what's missing plus the install command, so you find out before a long run rather than mid-stream. Zip archives are recursed one level (nested zips are not descended beyond that, and `-MaxZipEntries` caps entries per archive as a zip-bomb guard).
 
-**Still not supported:** encrypted or password-protected files, and `.msg` (Outlook) — parseable but on the roadmap, not implemented.
+**Still not supported:** encrypted or password-protected files, and binary attachments embedded inside `.msg` messages.
 
 ## Configuration options
 
@@ -169,8 +171,20 @@ Stage 2 checks for these helpers **at startup** and prints what's missing plus t
 | `-MaxZipEntries` | `200` | Cap on entries extracted per zip |
 | `-Context` | `60` | Characters of surrounding text captured per match |
 | `-NoDistinctReport` | off | Emit only the full occurrence CSV, skip the distinct/summary report |
+| `-DryRun` | off | Plan only: classify what a run would download (types, sizes, coverage) and write a manifest, without authenticating or pulling content |
 | `-KeepFiles` | off | Keep downloaded files (default deletes after extraction) |
 | `-Validators` / `-Country` / `-Category` | all | Scope which validators run |
+
+### Dry run
+
+`-DryRun` plans a run without authenticating or downloading anything. It reads the Stage 1 report, classifies each unique file by how Stage 2 would handle it, and writes a `-dryrun.csv` manifest plus a console breakdown by disposition and extension:
+
+```powershell
+.\Invoke-ContextValidation.ps1 -TenantId x -ClientId y -ClientSecret z `
+    -ReportCsv .\report\keyword-discovery-site-*.csv -DryRun
+```
+
+Use it to size a run before pulling PII to disk - it shows how many files are native vs. helper-dependent vs. unsupported vs. oversized, and the total download volume. Credentials aren't used in dry-run mode (pass any placeholder).
 
 ## Adding a custom validator
 
