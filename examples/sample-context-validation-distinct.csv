@@ -1,0 +1,5 @@
+Type,IdCountry,Category,Match,ChecksumValid,FileCount,Occurrences,SampleFile,SampleUrl,SampleContext
+CH-AHV,CH,national-id,756.1234.5678.97,True,14,9548,HR_Export_Hauptaufgaben.xlsx,https://mt1.sharepoint.com/sites/HRSchweiz/Shared%20Documents/HR_Export_Hauptaufgaben.xlsx,Mitarbeiter AHV 756.1234.5678.97 Lohnklasse 4 Eintritt 2019
+CH-AHV,CH,national-id,756.9217.0651.09,True,8,412,Lohnlauf_2026.xlsx,https://mt1.sharepoint.com/sites/HRSchweiz/Shared%20Documents/Lohnlauf_2026.xlsx,Sozialversicherungsnummer 756.9217.0651.09 Abteilung Zurich
+DE-RVNR,DE,national-id,65 121267 H 008,True,3,26,Entsendung_DE.xlsx,https://mt1.sharepoint.com/sites/HRSchweiz/Shared%20Documents/Entsendung_DE.xlsx,deutscher Kollege SV 65 121267 H 008 Entsendung
+DE-Personalnummer,DE,employee-id,A-4471,,22,99420,MA_Handbuch.pdf,https://mt1.sharepoint.com/sites/HRSchweiz/Shared%20Documents/MA_Handbuch.pdf,Personalnummer: A-4471 Abteilung Zurich

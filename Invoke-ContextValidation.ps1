@@ -29,8 +29,13 @@
       2. Invoke-ContextValidation.ps1 -ReportCsv <that csv>  -> validated CSV
 
     Text extraction is native for: txt, csv, tsv, log, xml, html, json, md,
-    docx, xlsx, pptx. PDF requires pdftotext (poppler) on PATH; if absent, PDFs
-    are skipped with a warning. Legacy binary doc/xls/ppt are not supported.
+    docx, xlsx, pptx. PDF needs pdftotext (poppler). Legacy binary doc/xls/ppt
+    and zip archives are handled if LibreOffice (soffice) is available; zips are
+    recursed into. Missing helpers are reported once at startup, not per file.
+
+    Output is two reports: a full occurrence-level CSV, and a DISTINCT report
+    that collapses repeated numbers to one row per unique identifier with file
+    and occurrence counts - the client-ready view.
 
 .EXAMPLE
     .\Invoke-ContextValidation.ps1 `
@@ -67,8 +72,15 @@ param(
     # Characters of surrounding text to capture per match.
     [int]$Context = 60,
 
-    # Cap on file size to download (MB). Larger files are skipped.
+    # Cap on file size to download (MB). Larger files are skipped. Raise for
+    # tenants with big HR exports, e.g. -MaxFileMB 100.
     [int]$MaxFileMB = 25,
+
+    # Max entries to extract from a single zip archive (guards against zip bombs).
+    [int]$MaxZipEntries = 200,
+
+    # Skip the distinct/summary report and emit only the full occurrence CSV.
+    [switch]$NoDistinctReport,
 
     [string]$OutDir = ".\report",
     [switch]$KeepFiles
@@ -77,6 +89,29 @@ param(
 $ErrorActionPreference = "Stop"
 
 Import-Module (Join-Path $PSScriptRoot 'GraphSearch.Validators.psm1') -Force
+
+# ---------- Preflight: external helpers ----------
+# Detect optional converters once, up front, so the operator sees what's
+# missing (and how to install it) before a long run instead of mid-stream.
+$script:HasPdftotext = [bool](Get-Command pdftotext -ErrorAction SilentlyContinue)
+$script:HasSoffice   = [bool](Get-Command soffice   -ErrorAction SilentlyContinue)
+if (-not $script:HasSoffice) {
+    # LibreOffice often isn't on PATH even when installed; probe common locations.
+    $sofficePaths = @(
+        "$env:ProgramFiles\LibreOffice\program\soffice.exe",
+        "${env:ProgramFiles(x86)}\LibreOffice\program\soffice.exe",
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    )
+    $found = $sofficePaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    if ($found) { $script:SofficePath = $found; $script:HasSoffice = $true }
+}
+
+Write-Host "Helper availability:" -ForegroundColor Yellow
+Write-Host ("  pdftotext (PDF)          : {0}" -f ($(if($script:HasPdftotext){'yes'}else{'NO'}))) -ForegroundColor $(if($script:HasPdftotext){'Green'}else{'DarkYellow'})
+Write-Host ("  soffice (doc/xls/ppt,zip): {0}" -f ($(if($script:HasSoffice){'yes'}else{'NO'}))) -ForegroundColor $(if($script:HasSoffice){'Green'}else{'DarkYellow'})
+if (-not $script:HasPdftotext) { Write-Host "    -> PDFs will be skipped. Install: winget install -e --id oschwartz10612.Poppler" -ForegroundColor DarkGray }
+if (-not $script:HasSoffice)   { Write-Host "    -> Legacy Office (.doc/.xls/.ppt) and zip contents will be skipped. Install: winget install -e --id TheDocumentFoundation.LibreOffice" -ForegroundColor DarkGray }
+Write-Host ""
 
 if (-not (Test-Path $ReportCsv)) { throw "Report CSV not found: $ReportCsv" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -148,8 +183,64 @@ function Convert-XmlToText { param([string]$Xml)
     return $t
 }
 
+function Invoke-Soffice {
+    param([string]$Source,[string]$ConvertTo,[string]$OutDir)
+    $exe = if ($script:SofficePath) { $script:SofficePath } else { 'soffice' }
+    # headless convert; soffice writes <basename>.<ext> into OutDir
+    & $exe --headless --norestore --convert-to $ConvertTo --outdir $OutDir $Source *> $null
+    $target = Join-Path $OutDir ([System.IO.Path]::GetFileNameWithoutExtension($Source) + '.' + ($ConvertTo -split ':')[0])
+    if (Test-Path $target) { return $target }
+    return $null
+}
+
+function Convert-LegacyOffice {
+    # Convert .doc/.xls/.ppt to their modern equivalents via LibreOffice, then
+    # reuse the native extractor. Returns extracted text or $null.
+    param([string]$Path,[string]$Extension,[string]$WorkDir)
+    if (-not $script:HasSoffice) {
+        Write-Warning "  soffice not available; skipping legacy $Extension $([IO.Path]::GetFileName($Path))"
+        return $null
+    }
+    $map = @{ '.doc'='docx'; '.xls'='xlsx'; '.ppt'='pptx' }
+    $to  = $map[$Extension.ToLower()]
+    if (-not $to) { return $null }
+    $converted = Invoke-Soffice -Source $Path -ConvertTo $to -OutDir $WorkDir
+    if (-not $converted) { Write-Warning "  conversion failed: $([IO.Path]::GetFileName($Path))"; return $null }
+    $text = Get-FileText -Path $converted -Extension ".$to" -Depth 1
+    Remove-Item $converted -Force -ErrorAction SilentlyContinue
+    return $text
+}
+
+function Get-ArchiveText {
+    # Recurse one level into a zip: extract supported entries and concatenate
+    # their text. Depth-guarded so nested zips don't recurse without bound.
+    param([string]$Path,[int]$Depth)
+    if ($Depth -ge 2) { return $null }   # don't descend into zips-in-zips-in-zips
+    $sb = New-Object System.Text.StringBuilder
+    $ex = Join-Path ([System.IO.Path]::GetDirectoryName($Path)) ([guid]::NewGuid().ToString('N').Substring(0,8))
+    New-Item -ItemType Directory -Force -Path $ex | Out-Null
+    try {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        $count = 0
+        try {
+            foreach ($entry in $archive.Entries) {
+                if ([string]::IsNullOrEmpty($entry.Name)) { continue }   # directory
+                if ($count -ge $MaxZipEntries) { Write-Warning "  zip entry cap ($MaxZipEntries) reached"; break }
+                $count++
+                $dest = Join-Path $ex ("{0:D4}{1}" -f $count, [System.IO.Path]::GetExtension($entry.Name))
+                try {
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $dest, $true)
+                    $t = Get-FileText -Path $dest -Extension ([System.IO.Path]::GetExtension($entry.Name)) -Depth ($Depth + 1)
+                    if ($t) { [void]$sb.AppendLine($t) }
+                } catch { } finally { Remove-Item $dest -Force -ErrorAction SilentlyContinue }
+            }
+        } finally { $archive.Dispose() }
+    } finally { Remove-Item $ex -Recurse -Force -ErrorAction SilentlyContinue }
+    return $sb.ToString()
+}
+
 function Get-FileText {
-    param([string]$Path,[string]$Extension)
+    param([string]$Path,[string]$Extension,[int]$Depth = 0)
     switch -Regex ($Extension.ToLower()) {
         '^\.(txt|csv|tsv|log|md|json)$' {
             return Get-Content -Path $Path -Raw -Encoding UTF8
@@ -168,11 +259,16 @@ function Get-FileText {
         '^\.pptx$' {
             return Convert-XmlToText (Get-ZipEntryText -Zip $Path -EntryPattern '^ppt/slides/slide\d+\.xml$')
         }
+        '^\.(doc|xls|ppt)$' {
+            return Convert-LegacyOffice -Path $Path -Extension $Extension -WorkDir ([System.IO.Path]::GetDirectoryName($Path))
+        }
+        '^\.zip$' {
+            return Get-ArchiveText -Path $Path -Depth $Depth
+        }
         '^\.pdf$' {
-            $pdftotext = Get-Command pdftotext -ErrorAction SilentlyContinue
-            if (-not $pdftotext) { Write-Warning "pdftotext not found; skipping PDF $([IO.Path]::GetFileName($Path))"; return $null }
+            if (-not $script:HasPdftotext) { return $null }   # already warned at startup
             $txt = "$Path.txt"
-            & $pdftotext.Source -q -enc UTF-8 $Path $txt 2>$null
+            & pdftotext -q -enc UTF-8 $Path $txt 2>$null
             if (Test-Path $txt) { $c = Get-Content $txt -Raw -Encoding UTF8; Remove-Item $txt -Force; return $c }
             return $null
         }
@@ -225,6 +321,7 @@ foreach ($f in $files) {
                 IdCountry     = $hit.Country
                 Category      = $hit.Category
                 Match         = $hit.Match
+                Normalized    = ($hit.Match -replace '[\s.\-]','').ToUpper()
                 ChecksumValid = $hit.ChecksumValid
                 Offset        = $hit.Offset
                 Context       = $hit.Context
@@ -240,24 +337,71 @@ foreach ($f in $files) {
 if (-not $KeepFiles) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 else { Write-Host "Downloaded files kept in $tmp" -ForegroundColor DarkGray }
 
-# ---------- Report ----------
+# ---------- Report: full occurrence-level ----------
 $stamp = Get-Date -Format yyyyMMdd-HHmmss
 $csv = Join-Path $OutDir "context-validation-$stamp.csv"
 $findings | Export-Csv -Path $csv -NoTypeInformation -Encoding UTF8
-Write-Host "`n$($findings.Count) finding(s) -> $csv" -ForegroundColor Green
+Write-Host "`n$($findings.Count) occurrence(s) -> $csv" -ForegroundColor Green
 
-if (Get-Module -ListAvailable -Name ImportExcel) {
+$hasExcel = [bool](Get-Module -ListAvailable -Name ImportExcel)
+if ($hasExcel) {
     $xlsx = $csv -replace '\.csv$','.xlsx'
-    $findings | Export-Excel -Path $xlsx -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName "Validated"
+    $findings | Export-Excel -Path $xlsx -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName "Occurrences"
     Write-Host "XLSX -> $xlsx" -ForegroundColor Green
 }
 
-# summary: confirmed vs keyword-only
+# ---------- Report: distinct (client-ready) ----------
+# Collapse repeated numbers: one row per unique identifier, with how many files
+# and occurrences it appeared in. This is the count that goes to a client -
+# "N distinct AHV numbers", not "half a million cell hits".
+if (-not $NoDistinctReport) {
+    $distinct = $findings | Group-Object Type,Normalized | ForEach-Object {
+        $g = $_.Group
+        $first = $g[0]
+        [pscustomobject]@{
+            Type          = $first.Type
+            IdCountry     = $first.IdCountry
+            Category      = $first.Category
+            Match         = $first.Match
+            ChecksumValid = $first.ChecksumValid
+            FileCount     = (@($g | Select-Object -ExpandProperty WebUrl -Unique)).Count
+            Occurrences   = $g.Count
+            SampleFile    = $first.FileName
+            SampleUrl     = $first.WebUrl
+            SampleContext = $first.Context
+        }
+    } | Sort-Object Type, @{Expression='FileCount';Descending=$true}
+
+    $dcsv = Join-Path $OutDir "context-validation-$stamp-distinct.csv"
+    $distinct | Export-Csv -Path $dcsv -NoTypeInformation -Encoding UTF8
+    Write-Host "$($distinct.Count) distinct identifier(s) -> $dcsv" -ForegroundColor Green
+    if ($hasExcel) {
+        $dxlsx = $dcsv -replace '\.csv$','.xlsx'
+        $distinct | Export-Excel -Path $dxlsx -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -WorksheetName "Distinct"
+        Write-Host "XLSX -> $dxlsx" -ForegroundColor Green
+    }
+}
+
+# ---------- Summary ----------
 $confirmed = @($findings | Where-Object { $_.ChecksumValid -eq $true }).Count
 $invalid   = @($findings | Where-Object { $_.ChecksumValid -eq $false }).Count
 $unknown   = @($findings | Where-Object { $null -eq $_.ChecksumValid }).Count
 Write-Host ""
-Write-Host "  checksum-valid : $confirmed" -ForegroundColor Green
-Write-Host "  format-match, checksum-invalid : $invalid" -ForegroundColor DarkYellow
+Write-Host "Occurrences" -ForegroundColor Yellow
+Write-Host "  checksum-valid                    : $confirmed" -ForegroundColor Green
+Write-Host "  format-match, checksum-invalid    : $invalid" -ForegroundColor DarkYellow
 Write-Host "  no checksum (e.g. Personalnummer) : $unknown" -ForegroundColor DarkGray
-$findings | Group-Object Type | Select-Object Name,Count | Format-Table -AutoSize
+
+if (-not $NoDistinctReport) {
+    Write-Host "`nDistinct identifiers by type (checksum-valid only)" -ForegroundColor Yellow
+    $findings |
+        Where-Object { $_.ChecksumValid -eq $true } |
+        Group-Object Type |
+        ForEach-Object {
+            [pscustomobject]@{
+                Type     = $_.Name
+                Distinct = (@($_.Group | Select-Object -ExpandProperty Normalized -Unique)).Count
+                Files    = (@($_.Group | Select-Object -ExpandProperty WebUrl -Unique)).Count
+            }
+        } | Sort-Object Type | Format-Table -AutoSize
+}

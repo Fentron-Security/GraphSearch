@@ -101,6 +101,8 @@ Two mitigations, both built in: `ChecksumValid` lets you filter to checksum-pass
 | `CreditCard` | `4111111111111111` | valid (Luhn) |
 | `IBAN` | `GB82 WEST 1234 5698 7654 32` | valid (mod-97) |
 
+> **CH-AHV note.** The `756` prefix is Switzerland's AHV / ISO-3166 numeric prefix. GS1 product barcodes (GTINs) for Switzerland use `760-769`, so a Swiss product barcode will not collide with the `756` AHV pattern. A near-100% checksum-valid rate on `756`-prefixed matches is a strong signal of real AHV numbers, not barcodes.
+
 Published "example" national IDs frequently use fabricated check digits and will correctly fail (e.g. the German `65 170439 K 001`). That is the validator working, not a bug.
 
 ### Personalnummer — why there is no validator
@@ -109,7 +111,9 @@ A Personalnummer is an **employer-assigned** number with no national format or c
 
 ## Output
 
-`report\context-validation-YYYYMMDD-HHMMSS.csv`:
+Two reports are written per run (plus XLSX copies when `ImportExcel` is installed).
+
+**Full — `context-validation-YYYYMMDD-HHMMSS.csv`** — one row per occurrence:
 
 | Column | Description |
 |---|---|
@@ -120,20 +124,53 @@ A Personalnummer is an **employer-assigned** number with no national format or c
 | `IdCountry` | Country the identifier belongs to |
 | `Category` | `payment`, `bank`, `national-id`, or `employee-id` |
 | `Match` | The matched string |
-| `ChecksumValid` | `True` = format **and** checksum valid; `False` = format matched but checksum failed; blank = no checksum exists |
-| `Offset` | Character offset of the match within the extracted text |
-| `Context` | Surrounding text (`±Context` chars) so an analyst can judge relevance |
+| `Normalized` | Match with separators stripped, used for dedup |
+| `ChecksumValid` | `True` / `False` / blank (no checksum exists) |
+| `Offset` | Character offset within the extracted text |
+| `Context` | Surrounding text (`±Context` chars) |
 | `DriveId` / `ItemId` | For follow-up Graph calls |
 
-The console summary splits findings three ways: checksum-valid, format-match-but-checksum-invalid, and no-checksum. **Checksum-valid is your real-exposure count** — the number worth reporting to a client.
+**Distinct — `context-validation-YYYYMMDD-HHMMSS-distinct.csv`** — one row per unique identifier, collapsing repeats:
+
+| Column | Description |
+|---|---|
+| `Type` / `IdCountry` / `Category` | As above |
+| `Match` | The identifier |
+| `ChecksumValid` | Validity |
+| `FileCount` | Number of distinct files it appears in |
+| `Occurrences` | Total occurrence count across all files |
+| `SampleFile` / `SampleUrl` / `SampleContext` | One example location + context |
+
+**Why two.** A single HR export can produce hundreds of thousands of occurrence rows — one per cell. The distinct report answers the question a client actually asks: *how many unique numbers, in how many files*. Report the distinct count; use the full report for drill-down.
+
+The console summary prints occurrence counts (valid / invalid / no-checksum) and a distinct-identifier-by-type table for checksum-valid hits — the headline numbers for a findings write-up.
 
 ## Supported file types
 
-Native extraction: `txt`, `csv`, `tsv`, `log`, `md`, `json`, `xml`, `html`, `docx`, `xlsx`, `pptx`.
+Native (no external tools): `txt`, `csv`, `tsv`, `log`, `md`, `json`, `xml`, `html`, `docx`, `xlsx`, `pptx`.
 
-**PDF** requires [`pdftotext`](https://poppler.freedesktop.org/) (poppler) on `PATH`. Without it, PDFs are skipped with a warning. On Windows: `winget install oschwartz10612.Poppler` or add a poppler build to `PATH`.
+With optional helpers on `PATH`:
 
-**Not supported:** legacy binary `doc` / `xls` / `ppt`, and anything encrypted or password-protected.
+| Type | Helper | Install (Windows) |
+|---|---|---|
+| `pdf` | poppler (`pdftotext`) | `winget install -e --id oschwartz10612.Poppler` |
+| `doc`, `xls`, `ppt` (legacy binary) | LibreOffice (`soffice`) | `winget install -e --id TheDocumentFoundation.LibreOffice` |
+| `zip` | LibreOffice for any legacy Office inside; native extractors otherwise | as above |
+
+Stage 2 checks for these helpers **at startup** and prints what's missing plus the install command, so you find out before a long run rather than mid-stream. Zip archives are recursed one level (nested zips are not descended beyond that, and `-MaxZipEntries` caps entries per archive as a zip-bomb guard).
+
+**Still not supported:** encrypted or password-protected files, and `.msg` (Outlook) — parseable but on the roadmap, not implemented.
+
+## Configuration options
+
+| Option | Default | Purpose |
+|---|---|---|
+| `-MaxFileMB` | `25` | Skip files larger than this. Raise for big HR exports (`-MaxFileMB 100`) |
+| `-MaxZipEntries` | `200` | Cap on entries extracted per zip |
+| `-Context` | `60` | Characters of surrounding text captured per match |
+| `-NoDistinctReport` | off | Emit only the full occurrence CSV, skip the distinct/summary report |
+| `-KeepFiles` | off | Keep downloaded files (default deletes after extraction) |
+| `-Validators` / `-Country` / `-Category` | all | Scope which validators run |
 
 ## Adding a custom validator
 
